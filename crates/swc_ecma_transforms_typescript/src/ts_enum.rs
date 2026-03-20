@@ -103,10 +103,13 @@ impl From<f64> for TsEnumRecordValue {
     }
 }
 
+pub(crate) type ConstVarRecord = FxHashMap<Id, TsEnumRecordValue>;
+
 pub(crate) struct EnumValueComputer<'a> {
     pub enum_id: &'a Id,
     pub unresolved_ctxt: SyntaxContext,
     pub record: &'a TsEnumRecord,
+    pub const_vars: &'a ConstVarRecord,
 }
 
 /// https://github.com/microsoft/TypeScript/pull/50528
@@ -148,6 +151,12 @@ impl EnumValueComputer<'_> {
                             .make_member(ident.clone().into())
                             .into(),
                     ),
+                })
+                .or_else(|| {
+                    self.const_vars
+                        .get(&ident.to_id())
+                        .filter(|v| v.is_const())
+                        .cloned()
                 })
                 .unwrap_or_else(|| TsEnumRecordValue::Opaque(expr)),
             Expr::Paren(e) => self.compute_rec(e.expr),

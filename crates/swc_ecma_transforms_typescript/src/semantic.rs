@@ -1,4 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
+use swc_atoms::Atom;
 use swc_common::{Mark, Span, SyntaxContext};
 use swc_ecma_ast::*;
 use swc_ecma_utils::{find_pat_ids, stack_size::maybe_grow_default};
@@ -7,7 +8,9 @@ use swc_ecma_visit::{noop_visit_type, Visit, VisitWith};
 use crate::{
     retain::{should_retain_decl, IsConcrete},
     shared::{enum_member_id_atom, get_module_ident},
-    ts_enum::{EnumValueComputer, TsEnumRecord, TsEnumRecordKey, TsEnumRecordValue},
+    ts_enum::{
+        ConstVarRecord, EnumValueComputer, TsEnumRecord, TsEnumRecordKey, TsEnumRecordValue,
+    },
 };
 
 #[derive(Debug, Default)]
@@ -17,6 +20,7 @@ pub(crate) struct SemanticInfo {
     pub id_value: FxHashSet<Id>,
     pub exported_binding: FxHashMap<Id, Option<Id>>,
     pub enum_record: TsEnumRecord,
+    pub const_vars: ConstVarRecord,
     pub const_enum: FxHashSet<Id>,
     pub namespace_import_equals_usage: FxHashSet<Span>,
 }
@@ -254,6 +258,7 @@ impl SemanticAnalyzer {
         enum_id: &Id,
         default_init: &TsEnumRecordValue,
         record: &TsEnumRecord,
+        const_vars: &ConstVarRecord,
         unresolved_ctxt: SyntaxContext,
     ) -> TsEnumRecordValue {
         member
@@ -263,6 +268,7 @@ impl SemanticAnalyzer {
                     enum_id,
                     unresolved_ctxt,
                     record,
+                    const_vars,
                 }
                 .compute(expr)
             })
@@ -522,6 +528,39 @@ impl Visit for SemanticAnalyzer {
         }
     }
 
+    fn visit_var_decl(&mut self, node: &VarDecl) {
+        node.visit_children_with(self);
+
+        if self.skip_transform_info || node.kind != VarDeclKind::Const {
+            return;
+        }
+
+        for decl in &node.decls {
+            let Pat::Ident(ident) = &decl.name else {
+                continue;
+            };
+
+            let Some(init) = &decl.init else {
+                continue;
+            };
+
+            let value = match &**init {
+                Expr::Lit(Lit::Str(s)) => {
+                    let value = s
+                        .value
+                        .as_str()
+                        .map(Atom::from)
+                        .unwrap_or_else(|| Atom::from(s.value.to_string_lossy()));
+                    TsEnumRecordValue::String(value)
+                }
+                Expr::Lit(Lit::Num(n)) => TsEnumRecordValue::Number(n.value.into()),
+                _ => continue,
+            };
+
+            self.info.const_vars.insert(ident.to_id(), value);
+        }
+    }
+
     fn visit_ts_enum_decl(&mut self, node: &TsEnumDecl) {
         node.visit_children_with(self);
 
@@ -548,6 +587,7 @@ impl Visit for SemanticAnalyzer {
                 &id.to_id(),
                 &default_init,
                 &self.info.enum_record,
+                &self.info.const_vars,
                 self.unresolved_ctxt,
             );
 
